@@ -287,7 +287,7 @@ void i2c_gecko_isr(const struct device *dev)
 
 		if (pending & I2C_IF_ACK) {
 			/* Leader ACK'ed, so requesting more data */
-			data->target_cfg->callbacks->read_processed(data->target_cfg, &tx_byte);
+			cb_ret = data->target_cfg->callbacks->read_processed(data->target_cfg, &tx_byte);
 			if (0 == cb_ret)
 			{
 				config->base->CMD = I2C_CMD_ACK;
