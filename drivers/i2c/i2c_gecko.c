@@ -12,6 +12,7 @@
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/sys/barrier.h>
 #include <em_cmu.h>
 #include <em_i2c.h>
 #include <em_gpio.h>
@@ -192,7 +193,7 @@ static int i2c_gecko_target_register(const struct device *dev, struct i2c_target
 
 	I2C_SlaveAddressSet(config->base, cfg->address << _I2C_SADDR_ADDR_SHIFT);
 	/* Match with specified address, no wildcards in address */
-	I2C_SlaveAddressMaskSet(config->base, _I2C_SADDRMASK_SADDRMASK_MASK);
+	I2C_SlaveAddressMaskSet(config->base, _I2C_SADDRMASK_MASK);
 
 	I2C_IntDisable(config->base, _I2C_IEN_MASK);
 	I2C_IntEnable(config->base, I2C_IEN_ADDR | I2C_IEN_RXDATAV | I2C_IEN_ACK | I2C_IEN_SSTOP |
@@ -233,6 +234,7 @@ void i2c_gecko_isr(const struct device *dev)
 {
 	const struct i2c_gecko_config *config = dev->config;
 	struct i2c_gecko_data *data = dev->data;
+	int cb_ret = 0;
 
 	uint32_t pending;
 	uint32_t rx_byte;
@@ -249,23 +251,36 @@ void i2c_gecko_isr(const struct device *dev)
 		if (pending & I2C_IF_ADDR) {
 			/* Address Match, indicating that reception is started */
 			rx_byte = config->base->RXDATA;
-			config->base->CMD = I2C_CMD_ACK;
 
 			/* Check if read bit set */
 			if (rx_byte & 0x1) {
-				data->target_cfg->callbacks->read_requested(data->target_cfg,
+				cb_ret = data->target_cfg->callbacks->read_requested(data->target_cfg,
 									    &tx_byte);
-				config->base->TXDATA = tx_byte;
+				if (0 == cb_ret)
+				{
+					config->base->CMD = I2C_CMD_ACK;
+					barrier_dmem_fence_full();
+					config->base->TXDATA = tx_byte;
+				}
+				else
+					config->base->CMD = I2C_CMD_NACK;
 			} else {
-				data->target_cfg->callbacks->write_requested(data->target_cfg);
+				cb_ret = data->target_cfg->callbacks->write_requested(data->target_cfg);
+				if (0 == cb_ret)
+					config->base->CMD = I2C_CMD_ACK;
+				else
+					config->base->CMD = I2C_CMD_NACK;
 			}
 
 			I2C_IntClear(config->base, I2C_IF_ADDR | I2C_IF_RXDATAV);
 		} else if (pending & I2C_IF_RXDATAV) {
 			rx_byte = config->base->RXDATA;
 			/* Read new data and write to target address */
-			data->target_cfg->callbacks->write_received(data->target_cfg, rx_byte);
-			config->base->CMD = I2C_CMD_ACK;
+			cb_ret = data->target_cfg->callbacks->write_received(data->target_cfg, rx_byte);
+			if (0 == cb_ret)
+				config->base->CMD = I2C_CMD_ACK;
+			else
+				config->base->CMD = I2C_CMD_NACK;
 
 			I2C_IntClear(config->base, I2C_IF_RXDATAV);
 		}
@@ -273,7 +288,13 @@ void i2c_gecko_isr(const struct device *dev)
 		if (pending & I2C_IF_ACK) {
 			/* Leader ACK'ed, so requesting more data */
 			data->target_cfg->callbacks->read_processed(data->target_cfg, &tx_byte);
-			config->base->TXDATA = tx_byte;
+			if (0 == cb_ret)
+			{
+				config->base->CMD = I2C_CMD_ACK;
+				config->base->TXDATA = tx_byte;
+			}
+			else
+				config->base->CMD = I2C_CMD_NACK;
 
 			I2C_IntClear(config->base, I2C_IF_ACK);
 		}
